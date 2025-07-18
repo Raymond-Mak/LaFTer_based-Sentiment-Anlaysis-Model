@@ -60,12 +60,6 @@ def reset_cfg(cfg, args):
     if args.head:
         cfg.MODEL.HEAD.NAME = args.head
     
-    # 添加图像增强参数到配置
-    if hasattr(args, 'enable_augmentation'):
-        cfg.ENABLE_AUGMENTATION = args.enable_augmentation
-    
-    if hasattr(args, 'use_two_crops'):
-        cfg.USE_TWO_CROPS = args.use_two_crops
 
 
 def extend_cfg(cfg):
@@ -100,9 +94,6 @@ def extend_cfg(cfg):
     cfg.DATASET.SIGMA_CONF = 1.0  # Controls Gaussian distribution spread
     cfg.DATASET.EPSILON = 0.1     # Parameter to ensure non-zero probabilities
 
-    # Add image augmentation configuration
-    cfg.ENABLE_AUGMENTATION = False  # Enable image augmentation
-    cfg.USE_TWO_CROPS = False       # Use two crops transform for contrastive learning
 
     cfg.txt_cls = args.txt_cls
     cfg.gpt_prompts = args.gpt_prompts
@@ -515,8 +506,9 @@ def train_lafter_direct(args, model, tr_loader, val_loader):
                 if fallback_count <= 5:
                     print(f"Sample {i}: using fallback one-hot distribution")
                     print(f"  hasattr(item, 'emotion_distribution'): {hasattr(item, 'emotion_distribution')}")
-                    print(f"  item.emotion_distribution is None: {item.emotion_distribution is None}")
-                    print(f"  item.emotion_distribution: {item.emotion_distribution}")
+                    if hasattr(item, 'emotion_distribution'):
+                        print(f"  item.emotion_distribution is None: {item.emotion_distribution is None}")
+                        print(f"  item.emotion_distribution: {item.emotion_distribution}")
                     print(f"  Class: {item.classname}, Label: {item.label}")
                     print(f"  Image path: {item.impath}")
         
@@ -827,10 +819,6 @@ if __name__ == "__main__":
                 help='双任务损失中分布学习的权重系数（λ）')
     parser.add_argument('--direct_dualtask', action='store_true',
                 help='直接双任务模式：跳过文本分类器训练，直接进入图像双任务微调')
-    parser.add_argument('--enable_augmentation', action='store_true',
-                help='启用图像增强功能（随机裁剪、翻转、颜色抖动、高斯模糊等）')
-    parser.add_argument('--use_two_crops', action='store_true',
-                help='使用双作物变换进行对比学习（仅在启用增强时有效）')
     args = parser.parse_args()
     args.mile_stones = None
     main(args)
