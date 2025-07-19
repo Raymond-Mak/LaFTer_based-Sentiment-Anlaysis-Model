@@ -1,10 +1,8 @@
 import torch
 import json
 import torchvision.transforms as transforms
-from torchvision.transforms import InterpolationMode # Explicit import for clarity
+from torchvision.transforms import InterpolationMode
 import PIL.Image as Image
-from PIL import ImageFilter, ImageOps # Added ImageOps for potential future use, PIL.Image is used
-import random
 import os
 # Make sure the 'clip' library is correctly installed and importable
 try:
@@ -19,7 +17,7 @@ def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
     try:
         url = clip._MODELS[backbone_name]
-        model_path = clip._download(url, root=cfg.MODEL.WEIGHT_ROOT if hasattr(cfg.MODEL, 'WEIGHT_ROOT') else 'all_weights') # Use config path if available
+        model_path = clip._download(url, root=cfg.MODEL.WEIGHT_ROOT if hasattr(cfg.MODEL, 'WEIGHT_ROOT') else 'all_weights')
     except KeyError:
         raise ValueError(f"Unsupported CLIP backbone name: {backbone_name}")
     except Exception as e:
@@ -38,130 +36,14 @@ def load_clip_to_cpu(cfg):
     return model
 
 
-# --- Define the function to replace the lambda ---
-def convert_to_rgb(image):
-    """Converts a PIL image to RGB."""
-    # Ensure it's a PIL Image first (optional safeguard)
-    if not isinstance(image, Image.Image):
-         # If input might be a Tensor, convert back to PIL first
-         # This depends heavily on the pipeline order - assuming it's PIL here
-         pass # Or raise TypeError("Expected PIL Image for RGB conversion")
-    return image.convert("RGB")
-# -------------------------------------------------
-
-
-class TwoCropsTransform:
-    """Take two random crops of one image as the query and key."""
-
-    def __init__(self, base_transform, random_transform):
-        self.base_transform = base_transform  # from clip
-        self.random_tranform = random_transform  # random transforms (currently from simsiam)
-
-    def __call__(self, x):
-        q = self.base_transform(x)
-        k = self.random_tranform(x)
-        return [q, k]
-
-
-class GaussianBlur(object):
-    """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
-
-    def __init__(self, sigma=[.1, 2.]):
-        self.sigma = sigma
-
-    def __call__(self, x):
-        sigma = random.uniform(self.sigma[0], self.sigma[1])
-        # Ensure input is a PIL image for GaussianBlur
-        if not isinstance(x, Image.Image):
-             # Example: Convert tensor back to PIL if needed (adjust range if necessary)
-             # x = transforms.ToPILImage()(x)
-             pass # Assume input is PIL for now
-        x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
-        return x
-
-# Define interpolation mode using enum for modern torchvision
-# This variable is used below to replace the deprecated integer codes
-_INTERPOLATION_MODE = InterpolationMode.BICUBIC
-
-def get_random_transform(ndim):
-    # Define the normalization transform separately for clarity
-    # Using standard CLIP normalization parameters
-    normalize = transforms.Normalize((0.48145466, 0.4578275, 0.40821073),
-                                     (0.26862954, 0.26130258, 0.27577711))
-
-    # Define Gaussian Blur instance
-    blur = GaussianBlur(sigma=[0.1, 2.0]) # Standard SimCLR sigma range
-
-    return transforms.Compose([
-        # ***** THIS IS THE MODIFIED LINE *****
-        transforms.RandomResizedCrop(ndim, scale=(0.2, 1.), interpolation=_INTERPOLATION_MODE), # Use InterpolationMode enum
-        # *************************************
-        transforms.RandomHorizontalFlip(p=0.5), # Specify probability explicitly
-        transforms.RandomApply([
-            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1) # Explicit parameters
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([blur], p=0.5), # Apply blur randomly like in SimCLR/MoCo v2
-        transforms.ToTensor(), # Convert PIL Image to tensor
-        normalize # Apply normalization
-    ])
-
-# Test Transform (using the defined function instead of lambda and correct interpolation)
+# Standard test transform - this is the main transform used for both training and testing
 te_transform = transforms.Compose([
-    transforms.Resize(224, interpolation=_INTERPOLATION_MODE), # Already correct
+    transforms.Resize(224, interpolation=InterpolationMode.BICUBIC),  # Use InterpolationMode enum
     transforms.CenterCrop(224),
-    convert_to_rgb, # Use the defined function here
+    lambda x: x.convert("RGB"),  # 恢复原始的lambda函数
     transforms.ToTensor(),
     transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
 ])
-
-# Default Weakly Augmented Transform (using the defined function instead of lambda and correct interpolation)
-transform_default_clip_weakly_aug = transforms.Compose([
-    transforms.Resize(224, interpolation=_INTERPOLATION_MODE), # Already correct
-    transforms.CenterCrop(224),
-    convert_to_rgb, # Use the defined function here
-    transforms.ToTensor(),
-    transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-])
-
-# Training Transform combining base and random augmentations
-tr_transforms = TwoCropsTransform(transform_default_clip_weakly_aug, # Use the weakly augmented one as base for one crop
-                                  get_random_transform(224))          # Use strong augmentation for the other (now correctly uses InterpolationMode)
-
-# 用于双任务训练的单一增强变换（不使用TwoCropsTransform）
-tr_transform_single = get_random_transform(224)
-
-# ===== 图像增强功能控制函数 =====
-def get_transforms(enable_augmentation=False, use_two_crops=False):
-    """
-    根据参数返回相应的图像变换
-    
-    Args:
-        enable_augmentation (bool): 是否启用图像增强
-        use_two_crops (bool): 是否使用双作物变换（对比学习）
-    
-    Returns:
-        train_transform: 训练时的变换
-        test_transform: 测试时的变换
-    """
-    # 测试变换保持不变（标准化）
-    test_transform = te_transform
-    
-    if enable_augmentation:
-        if use_two_crops:
-            # 对比学习模式：返回双作物变换
-            train_transform = tr_transforms
-            print("🎨 Using augmented transforms with TwoCropsTransform for contrastive learning")
-        else:
-            # 单一增强模式：用于双任务学习
-            train_transform = tr_transform_single
-            print("🎨 Using augmented transforms with single crop for dual-task learning")
-    else:
-        # 无增强模式：使用标准变换（但这个分支现在在build_data_loader中不会被调用）
-        train_transform = te_transform
-        print("📷 Using standard transforms (no augmentation)")
-    
-    return train_transform, test_transform
 
 # === Label Generation Functions (Unchanged from your provided code) ===
 
@@ -447,104 +329,4 @@ def gen_labels_with_descrptions_and_clsname(classes, descriptions):
 
     return desc_, labels
 
-# --- Optional Main block for testing ---
-if __name__ == '__main__':
-    print("Testing CLIP model_utils functions...")
-
-    # --- Test Transforms ---
-    print("\nTesting Transforms:")
-    try:
-        dummy_pil_image = Image.new('L', (300, 300)) # Create a dummy grayscale PIL image
-        print(f"Input dummy image mode: {dummy_pil_image.mode}, size: {dummy_pil_image.size}")
-
-        # Test te_transform
-        output_te = te_transform(dummy_pil_image)
-        if hasattr(output_te, 'shape'):
-            print(f"te_transform output shape: {output_te.shape}, dtype: {output_te.dtype}") # Should be [3, 224, 224]
-        else:
-            print(f"te_transform output type: {type(output_te)}")
-
-        # Test transform_default_clip_weakly_aug
-        output_weak = transform_default_clip_weakly_aug(dummy_pil_image)
-        if hasattr(output_weak, 'shape'):
-            print(f"transform_default_clip_weakly_aug output shape: {output_weak.shape}, dtype: {output_weak.dtype}")
-        else:
-            print(f"transform_default_clip_weakly_aug output type: {type(output_weak)}")
-
-        # Test tr_transforms (TwoCropsTransform)
-        output_tr = tr_transforms(dummy_pil_image)
-        print(f"tr_transforms output type: {type(output_tr)}, length: {len(output_tr)}")
-        if len(output_tr) >= 2 and hasattr(output_tr[0], 'shape'):
-            print(f"  Crop 1 shape: {output_tr[0].shape}") # Should be [3, 224, 224] (weakly aug)
-            print(f"  Crop 2 shape: {output_tr[1].shape}") # Should be [3, 224, 224] (strongly aug)
-        else:
-            print(f"  Unexpected tr_transforms output structure")
-
-        # Test new transform selection function
-        train_aug, test_aug = get_transforms(enable_augmentation=True, use_two_crops=False)
-        output_aug = train_aug(dummy_pil_image)
-        if hasattr(output_aug, 'shape'):
-            print(f"Augmented single transform output shape: {output_aug.shape}")
-        else:
-            print(f"Augmented transform output type: {type(output_aug)}")
-
-    except Exception as e:
-        print(f"Error during transform testing: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # --- Test Label Generation ---
-    print("\nTesting Label Generation:")
-    dummy_classes = ['cat', 'dog_animal', 'bird']
-    dummy_templates = ["a photo of a {}", "an image depicting a {}"]
-    dummy_descriptions_dict = {
-        'cat': ['a feline animal', 'sleeps all day'],
-        'dog_animal': ['a canine friend', 'barks loudly'],
-        'bird': ['flies high', 'sings songs']
-    }
-    # Mock args for functions that need it
-    class MockArgs: dataset = 'dummy_dataset'
-    mock_args = MockArgs()
-
-    try:
-        # Test gen_labels_with_templates
-        desc_t, labels_t = gen_labels_with_templates(dummy_classes, dummy_templates)
-        print(f"gen_labels_with_templates: {len(desc_t)} descriptions generated.")
-        # print(list(zip(desc_t, labels_t))) # Uncomment to view
-
-        # Test gen_labels_with_classes
-        desc_c, labels_c = gen_labels_with_classes(dummy_classes)
-        print(f"gen_labels_with_classes: {len(desc_c)} descriptions generated.")
-        # print(list(zip(desc_c, labels_c)))
-
-        # Test gen_labels_with_classes_and_simple_template
-        desc_st, labels_st = gen_labels_with_classes_and_simple_template(dummy_classes)
-        print(f"gen_labels_with_classes_and_simple_template: {len(desc_st)} descriptions generated.")
-        # print(list(zip(desc_st, labels_st)))
-
-        # Test gen_labels_with_descrptions
-        desc_d, labels_d = gen_labels_with_descrptions(dummy_classes, dummy_descriptions_dict)
-        print(f"gen_labels_with_descrptions: {len(desc_d)} descriptions generated.")
-        # print(list(zip(desc_d, labels_d)))
-
-        # Test gen_labels_with_descrptions_and_clsname
-        desc_dc, labels_dc = gen_labels_with_descrptions_and_clsname(dummy_classes, dummy_descriptions_dict)
-        print(f"gen_labels_with_descrptions_and_clsname: {len(desc_dc)} descriptions generated.")
-        # print(list(zip(desc_dc, labels_dc)))
-
-        # Add tests for caption/synonym/expanded label functions if you have dummy data files
-        # Example (requires setting up dummy files/folders):
-        # print("Testing gen_labels_with_captions (requires dummy folder './dummy_captions')")
-        # os.makedirs('./dummy_captions', exist_ok=True)
-        # with open('./dummy_captions/cat.txt', 'w') as f: f.write("img1 meow\nimg2 purr")
-        # ... create other dummy files ...
-        # desc_cap, labels_cap = gen_labels_with_captions(dummy_classes, './dummy_captions', mock_args)
-        # print(f"gen_labels_with_captions: {len(desc_cap)} descriptions.")
-
-    except Exception as e:
-        print(f"Error during label generation testing: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print("\nmodel_utils.py testing finished.")
 

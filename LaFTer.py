@@ -295,7 +295,7 @@ def train_lafter(args, model, tr_loader, val_loader):
             print("emotion_dist_map is empty, distribution learning skipped")
         
         # 使用双任务损失函数，添加温度参数放大KL梯度
-        dual_task_loss = DualTaskLoss(lambda_weight=lambda_weight, num_classes=num_classes, temperature=10.0).cuda()
+        dual_task_loss = DualTaskLoss(lambda_weight=lambda_weight, num_classes=num_classes, temperature=16.0).cuda()
     else:
         print("Using traditional single-task classification mode")
 
@@ -531,7 +531,7 @@ def train_lafter_direct(args, model, tr_loader, val_loader):
         print("emotion_dist_map is empty, distribution learning skipped")
     
     # 使用双任务损失函数，添加温度参数放大KL梯度
-    dual_task_loss = DualTaskLoss(lambda_weight=lambda_weight, num_classes=num_classes, temperature=10.0).cuda()
+    dual_task_loss = DualTaskLoss(lambda_weight=lambda_weight, num_classes=num_classes, temperature=12.0).cuda()
 
     all_acc = list()
     optimizer, scheduler, criteria = setup_lafter_training_utils(args, model)

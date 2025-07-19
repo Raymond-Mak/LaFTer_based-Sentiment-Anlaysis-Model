@@ -394,32 +394,14 @@ class LaFTer(TrainerX):
             self.model = nn.DataParallel(self.model)
 
     def build_data_loader(self):
-        """Create essential data-related attributes with image augmentation support."""
-        # 导入图像变换函数
-        from utils.model_utils import get_transforms, te_transform
-        
-        # 获取增强参数（从配置或命令行参数中）
-        enable_augmentation = getattr(self.cfg, 'ENABLE_AUGMENTATION', False)
-        use_two_crops = getattr(self.cfg, 'USE_TWO_CROPS', False)
-        
-        # 如果不启用增强，直接使用原始变换以确保性能一致性
-        if not enable_augmentation:
-            train_transform = te_transform
-            test_transform = te_transform
-            print("Using original te_transform (no augmentation)")
-        else:
-            # 只有启用增强时才使用 get_transforms 函数
-            train_transform, test_transform = get_transforms(
-                enable_augmentation=enable_augmentation, 
-                use_two_crops=use_two_crops
-            )
-        
-        # 创建DataManager，传入自定义变换
-        dm = DataManager(self.cfg, custom_tfm_test=test_transform, custom_tfm_train=train_transform)
+        """Create essential data-related attributes."""
+        # 直接使用原始的te_transform，不引入复杂的条件逻辑
+        from utils.model_utils import te_transform
+        dm = DataManager(self.cfg, custom_tfm_test=te_transform, custom_tfm_train=te_transform)
 
         self.train_loader_x = dm.train_loader_x
-        self.train_loader_u = dm.train_loader_u  # 可选，保持不变
-        self.val_loader = dm.val_loader  # 可选，保持不变
+        self.train_loader_u = dm.train_loader_u
+        self.val_loader = dm.val_loader
         self.test_loader = dm.test_loader
 
         self.num_classes = dm.num_classes
