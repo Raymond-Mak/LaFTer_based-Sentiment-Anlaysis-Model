@@ -1,0 +1,42 @@
+TRAINER:
+  NAME: MultiLayerLaFTer
+
+MODEL:
+  BACKBONE:
+    NAME: ViT-B/32
+
+DATALOADER:
+  TRAIN_X:
+    BATCH_SIZE: 32
+  TEST:
+    BATCH_SIZE: 100
+
+OPTIM:
+  NAME: adamw
+  LR: 0.001
+  WEIGHT_DECAY: 0.0001
+  MAX_EPOCH: 8
+
+TRAIN:
+  PRINT_FREQ: 10
+
+# Multi-layer prompt specific settings
+MULTI_LAYER_PROMPT:
+  ENABLED: True
+  NUM_STAGES: 4
+  TOKENS_PER_STAGE: 16
+  PROGRESSIVE_TRAINING: True
+  WARMUP_EPOCHS: 2
+  PROGRESSIVE_EPOCHS: 3
+  
+# NGA settings
+NGA:
+  INIT_SIGMA: 1.0
+  LEARNABLE_SIGMA: True
+
+# Consistency loss settings
+CONSISTENCY_LOSS:
+  ALPHA: 0.1
+
+DATALOADER:
+  NUM_WORKERS: 0 

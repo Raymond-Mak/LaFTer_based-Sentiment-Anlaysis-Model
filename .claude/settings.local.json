@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(del:*)",
+      "Bash(python:*)",
+      "Bash(scriptsquick_test.bat)",
+      "Bash(cmd /c:*)"
+    ],
+    "deny": []
+  }
+}

@@ -10,9 +10,15 @@ from utils.utils import *
 
 import datasets.Emotion6
 import datasets.Emoset
-import trainers.LaFTer_trainers as lafter_uft
+# 导入新的分离后的训练器 - 确保训练器被注册
+import trainers.LaFTer_basic
+import trainers.LaFTer_multilayer
 from utils.utils import *
 import os
+
+# 验证训练器注册
+from dassl.engine import TRAINER_REGISTRY
+print("Registered trainers:", list(TRAINER_REGISTRY._obj_map.keys()))
 
 
 def print_args(args, cfg):
@@ -92,6 +98,24 @@ def extend_cfg(cfg):
     # Add distribution strategy configuration
     cfg.DATASET.DISTRIBUTION_STRATEGY = "strategy1"  # Options: "json" or "strategy1"
     cfg.DATASET.SIGMA_CONF = 1.0  # Controls Gaussian distribution spread
+    
+    # Multi-layer prompt configuration
+    cfg.MULTI_LAYER_PROMPT = CN()
+    cfg.MULTI_LAYER_PROMPT.ENABLED = False
+    cfg.MULTI_LAYER_PROMPT.NUM_STAGES = 4
+    cfg.MULTI_LAYER_PROMPT.TOKENS_PER_STAGE = 16
+    cfg.MULTI_LAYER_PROMPT.PROGRESSIVE_TRAINING = True
+    cfg.MULTI_LAYER_PROMPT.WARMUP_EPOCHS = 2
+    cfg.MULTI_LAYER_PROMPT.PROGRESSIVE_EPOCHS = 3
+    
+    # NGA configuration
+    cfg.NGA = CN()
+    cfg.NGA.INIT_SIGMA = 1.0
+    cfg.NGA.LEARNABLE_SIGMA = True
+    
+    # Consistency loss configuration
+    cfg.CONSISTENCY_LOSS = CN()
+    cfg.CONSISTENCY_LOSS.ALPHA = 0.1
     cfg.DATASET.EPSILON = 0.1     # Parameter to ensure non-zero probabilities
 
 
@@ -113,8 +137,20 @@ def setup_cfg(args):
 
     # 3. From input arguments
     reset_cfg(cfg, args)
+    
+    # 4. 设置特殊配置项
+    cfg.txt_cls = args.txt_cls
+    if hasattr(args, 'gpt_prompts'):
+        cfg.gpt_prompts = args.gpt_prompts
+    else:
+        cfg.gpt_prompts = False
 
-    # 4. From optional input arguments
+    # 5. Enable multi-layer prompts if requested
+    if hasattr(args, 'multi_layer_prompt') and args.multi_layer_prompt:
+        cfg.MULTI_LAYER_PROMPT.ENABLED = True
+        print("Multi-layer prompt mode enabled")
+
+    # 5. From optional input arguments
     cfg.merge_from_list(args.opts)
 
     return cfg
@@ -187,9 +223,267 @@ def test(args, teloader, model):
                 top1.update(acc1, len(labels))
 
     if not args.zero_shot:
-        return top1.avg * 100, top1_pl.avg * 100
-    else:
-        return top1_pl.avg * 100
+        return top1.avg
+
+
+# ===== 多层Prompt训练函数 =====
+
+def train_multi_layer_lafter(args, model, tr_loader, val_loader):
+    """
+    多层Prompt版本的LaFTer训练，支持渐进式训练策略
+    """
+    print("=== Starting Multi-Layer Prompt LaFTer Training ===")
+    
+    # 第一步：训练文本分类器（保持不变）
+    print("Phase 1: Training text classifier...")
+    train_txt_cls(args, model)
+    
+    # 检查是否启用双任务学习
+    use_dual_task = getattr(args, 'dual_task', False)
+    lambda_weight = getattr(args, 'lambda_weight', 0.8)
+    
+    # 确定类别数量
+    num_classes = 6  # 默认值
+    train_items = None
+    if hasattr(tr_loader.dataset, 'data_source') and hasattr(tr_loader.dataset.data_source, 'train_x'):
+        train_items = tr_loader.dataset.data_source.train_x
+        max_label = max(item.label for item in train_items)
+        num_classes = max_label + 1
+        print(f"Detected number of classes: {num_classes}")
+    
+    # 创建情感分布映射（如果启用双任务学习）
+    emotion_dist_map = {}
+    if use_dual_task and train_items:
+        print("Building emotion distribution map for dual-task learning...")
+        for i, item in enumerate(train_items):
+            if hasattr(item, 'emotion_distribution') and item.emotion_distribution is not None:
+                dist = np.array(item.emotion_distribution, dtype=np.float32)
+                dist = dist / dist.sum() if dist.sum() > 0 else np.zeros(num_classes, dtype=np.float32)
+                emotion_dist_map[i] = torch.from_numpy(dist).cuda()
+        print(f"Built emotion distribution map with {len(emotion_dist_map)} entries")
+
+    # 第二步：多层prompt训练
+    print("Phase 2: Multi-layer prompt training...")
+    
+    # 设置损失函数
+    if use_dual_task:
+        from utils.utils import DualTaskLoss
+        dual_task_loss = DualTaskLoss(lambda_weight=lambda_weight, num_classes=num_classes, temperature=16.0).cuda()
+    
+    # 设置优化器和调度器 - 使用自定义函数适配多层prompt
+    from utils.utils import setup_lafter_training_utils
+    optimizer, scheduler, criteria = setup_lafter_training_utils(args, model)
+    
+    all_acc = []
+    
+    # 简化的多层prompt训练
+    for epoch in range(args.epochs):
+        print(f'\n=== Epoch {epoch + 1}/{args.epochs} ===')
+        
+        # 设置模型训练状态
+        model.eval()  # 视觉编码器不训练
+        if hasattr(model, 'adapter'):
+            model.adapter.train()  # 适配器参与训练
+        
+        epoch_loss = 0.0
+        num_batches = 0
+        
+        for i, batch in enumerate(tr_loader):
+            images, labels = batch['img'].cuda(), batch['label'].cuda()
+            
+            optimizer.zero_grad()
+            
+            # 多层prompt前向传播
+            if hasattr(model, 'forward_supervised'):
+                outputs = model.forward_supervised(images)
+            else:
+                # 回退到普通前向传播
+                outputs = model(images)
+            
+            # 计算损失
+            if use_dual_task and emotion_dist_map:
+                # 双任务学习模式
+                batch_size = images.size(0)
+                emotion_distributions = []
+                start_idx = i * tr_loader.batch_size
+                
+                for j in range(batch_size):
+                    sample_idx = start_idx + j
+                    if sample_idx in emotion_dist_map:
+                        emotion_distributions.append(emotion_dist_map[sample_idx].cpu().numpy())
+                    else:
+                        # 回退到one-hot
+                        one_hot = np.zeros(num_classes, dtype=np.float32)
+                        one_hot[labels[j].cpu().item()] = 1.0
+                        emotion_distributions.append(one_hot)
+                
+                emotion_distributions = torch.tensor(np.stack(emotion_distributions), dtype=torch.float32).cuda()
+                total_loss, cls_loss, dist_loss = dual_task_loss(outputs, labels, emotion_distributions)
+                
+                if i % getattr(args, 'print_freq', 10) == 0:
+                    print(f"  Batch [{i+1}/{len(tr_loader)}] - "
+                          f"Total: {total_loss.item():.4f}, Cls: {cls_loss.item():.4f}, "
+                          f"Dist: {dist_loss.item():.4f}")
+            else:
+                # 单任务学习模式
+                total_loss = criteria(outputs, labels)
+                
+                if i % getattr(args, 'print_freq', 10) == 0:
+                    print(f"  Batch [{i+1}/{len(tr_loader)}] - Loss: {total_loss.item():.4f}")
+            
+            total_loss.backward()
+            optimizer.step()
+            
+            epoch_loss += total_loss.item()
+            num_batches += 1
+        
+        scheduler.step()
+        
+        # 评估
+        print(f'Evaluation at epoch {epoch + 1}')
+        if hasattr(model, 'eval_clip_multi_stage'):
+            # 使用多层prompt评估方法
+            acc = test_multi_stage_prompting(val_loader, model)
+        else:
+            # 回退到普通评估
+            acc = test_img_classifier(args, model, val_loader)
+        print(f'TOP-1 Accuracy: {acc:.2f}%')
+        all_acc.append(acc)
+        
+        # 打印阶段信息
+        avg_loss = epoch_loss / num_batches
+        print(f'Epoch {epoch + 1} completed - Loss: {avg_loss:.4f}, Accuracy: {acc:.2f}%')
+    
+    best_acc = max(all_acc)
+    print(f'\n=== Multi-Layer Prompt Training Completed ===')
+    print(f'Best Accuracy: {best_acc:.2f}%')
+    return best_acc
+
+
+def set_multi_stage_freeze_status(model, freeze_stages, active_stages):
+    """设置多层prompt各段的冻结状态"""
+    # 冻结指定stages的prompt参数
+    for stage_idx in freeze_stages:
+        if stage_idx < len(model.multi_prompts):
+            model.multi_prompts[stage_idx].requires_grad = False
+    
+    # 解冻指定stages的prompt参数
+    for stage_idx in active_stages:
+        if stage_idx < len(model.multi_prompts):
+            model.multi_prompts[stage_idx].requires_grad = True
+    
+    # NGA参数和stage权重始终可训练
+    model.nga_aggregator.sigmas.requires_grad = True
+    model.stage_weights.requires_grad = True
+    
+    print(f"Frozen stages: {freeze_stages}, Active stages: {active_stages}")
+
+
+def train_multi_stage_epoch(args, model, tr_loader, optimizer, criteria, dual_task_loss, emotion_dist_map, epoch):
+    """训练一个epoch（多层prompt版本）"""
+    model.train()
+    total_loss = 0.0
+    num_batches = 0
+    
+    for i, batch in enumerate(tr_loader):
+        images, labels = batch['img'].cuda(), batch['label'].cuda()
+        batch_size = images.size(0)
+        
+        optimizer.zero_grad()
+        
+        # 多层prompt前向传播
+        final_features, stage_outputs = model.forward_multi_stage(images)
+        
+        # 多段级联分类
+        final_logits, stage_logits = model.multi_stage_classification(stage_outputs)
+        
+        if dual_task_loss and emotion_dist_map:
+            # 双任务学习模式
+            emotion_distributions = []
+            for idx in range(batch_size):
+                global_idx = i * batch_size + idx
+                if global_idx in emotion_dist_map:
+                    emotion_distributions.append(emotion_dist_map[global_idx])
+                else:
+                    # 回退到one-hot
+                    one_hot = torch.zeros(len(model.classes)).cuda()
+                    one_hot[labels[idx]] = 1.0
+                    emotion_distributions.append(one_hot)
+            
+            emotion_distributions = torch.stack(emotion_distributions)
+            loss, cls_loss, dist_loss = dual_task_loss(final_logits, labels, emotion_distributions)
+            
+            # 添加多段一致性损失
+            consistency_loss = model.consistency_loss(stage_logits)
+            loss = loss + consistency_loss
+            
+            if i % args.print_freq == 0:
+                print(f"  Batch [{i+1}/{len(tr_loader)}] - "
+                      f"Total: {loss.item():.4f}, Cls: {cls_loss.item():.4f}, "
+                      f"Dist: {dist_loss.item():.4f}, Consistency: {consistency_loss.item():.4f}")
+        else:
+            # 单任务学习模式
+            loss = criteria(final_logits, labels)
+            
+            # 添加多段一致性损失
+            consistency_loss = model.consistency_loss(stage_logits)
+            loss = loss + consistency_loss
+            
+            if i % args.print_freq == 0:
+                print(f"  Batch [{i+1}/{len(tr_loader)}] - "
+                      f"Total: {loss.item():.4f}, Consistency: {consistency_loss.item():.4f}")
+        
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        num_batches += 1
+    
+    return total_loss / num_batches
+
+
+def test_multi_stage_prompting(test_loader, model):
+    """测试多层prompt模型"""
+    model.eval()
+    acc = Meter()
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            images, labels = batch['img'].cuda(), batch['label'].cuda()
+            
+            # 多层prompt推理
+            logits = model.eval_clip_multi_stage(images)
+            
+            # 计算准确率（作为比例，不是百分比）
+            _, predicted = torch.max(logits.data, 1)
+            correct = (predicted == labels).float().sum()
+            accuracy = correct / labels.size(0)  # 0-1之间的比例
+            acc.update(accuracy.item(), labels.size(0))
+    
+    return acc.accuracy()
+
+
+def main(args):
+    cfg = setup_cfg(args)
+    if cfg.SEED >= 0:
+        print("Setting fixed seed: {}".format(cfg.SEED))
+        set_random_seed(cfg.SEED)
+    setup_logger(cfg.OUTPUT_DIR)
+
+    if torch.cuda.is_available() and cfg.USE_CUDA:
+        torch.backends.cudnn.benchmark = True
+
+    print_args(args, cfg)
+
+    if args.eval_only:
+        trainer = build_trainer(cfg)
+        trainer.load_model(args.model_dir, epoch=args.load_epoch)
+        trainer.test()
+        return
+
+    if not args.no_train:
+        trainer = build_trainer(cfg)
+        trainer.train()
 
 
 def train_txt_cls(args, model):
@@ -201,6 +495,94 @@ def train_txt_cls(args, model):
         loss.backward()
         optimizer.step()
     model.txt_cls_init()
+
+
+class Meter:
+    """Compute and store the average and current value."""
+    def __init__(self, name='', fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        if isinstance(val, torch.Tensor):
+            val = val.item()
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def accuracy(self):
+        return self.avg * 100
+
+
+def zero_shot(model, test_loader):
+    """Zero-shot evaluation"""
+    model.eval()
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            images = batch["img"].cuda()
+            labels = batch["label"].cuda()
+            outputs = model(images)
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+    
+    print(f'Zero-shot Accuracy: {100.0 * correct / total:.2f}%')
+
+
+def test_img_classifier(args, model, teloader):
+    """
+    用已经训练好的图像分类器，在测试集上跑一次测试返回 top-1 精度。
+    处理图像输入而不是文本prompt。
+    """
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in tqdm(teloader):
+            # 从batch中提取图像和标签
+            images = batch["img"].to(model.device)  # 确保图像在正确的设备上
+            labels = batch["label"].to(model.device)  # 确保标签在相同的设备上
+            
+            # 需要确保模型有正确的评估方法
+            try:
+                # 尝试使用模型特定的评估方法(如果存在)
+                outputs = model.forward_normal_for_pl(images)  # 或model.eval_img_clas(images)
+            except AttributeError:
+                # 针对数据类型不匹配问题的处理
+                # 这里我们假设模型有一个特定的forward方法需要调用
+                # 您可能需要根据实际模型的实现来调整
+                if hasattr(model, 'text_features') and model.text_features.dtype != images.dtype:
+                    # 如果text_features是half类型，将images也转为half
+                    if model.text_features.dtype == torch.float16:
+                        images = images.half()
+                    # 如果images是half类型，将text_features转为float
+                    elif images.dtype == torch.float16:
+                        model.text_features = model.text_features.float()
+                
+                # 使用常规forward
+                outputs = model(images)
+            
+            # 计算预测结果
+            preds = outputs.argmax(dim=1)
+            
+            # 确保两个张量在同一设备上进行比较
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+    return 100.0 * correct / total
+
 
 def train_lafter(args, model, tr_loader, val_loader):
     # 第一步：训练文本分类器（保持不变）
@@ -433,6 +815,7 @@ def train_lafter(args, model, tr_loader, val_loader):
         all_acc.append(acc)
     print(f'-------------------------------- Best Accuracy: {max(all_acc)} --------------------------------')
 
+
 def train_lafter_direct(args, model, tr_loader, val_loader):
     """
     直接双任务图像微调模式：跳过文本分类器训练，直接进入图像微调阶段
@@ -643,49 +1026,16 @@ def train_lafter_direct(args, model, tr_loader, val_loader):
     return max(all_acc)
 
 
-def test_img_classifier(args, model, teloader):
-    """
-    用已经训练好的图像分类器，在测试集上跑一次测试返回 top-1 精度。
-    处理图像输入而不是文本prompt。
-    """
-    model.eval()
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for batch in tqdm(teloader):
-            # 从batch中提取图像和标签
-            images = batch["img"].to(model.device)  # 确保图像在正确的设备上
-            labels = batch["label"].to(model.device)  # 确保标签在相同的设备上
-            
-            # 需要确保模型有正确的评估方法
-            try:
-                # 尝试使用模型特定的评估方法(如果存在)
-                outputs = model.forward_normal_for_pl(images)  # 或model.eval_img_clas(images)
-            except AttributeError:
-                # 针对数据类型不匹配问题的处理
-                # 这里我们假设模型有一个特定的forward方法需要调用
-                # 您可能需要根据实际模型的实现来调整
-                if hasattr(model, 'text_features') and model.text_features.dtype != images.dtype:
-                    # 如果text_features是half类型，将images也转为half
-                    if model.text_features.dtype == torch.float16:
-                        images = images.half()
-                    # 如果images是half类型，将text_features转为float
-                    elif images.dtype == torch.float16:
-                        model.text_features = model.text_features.float()
-                
-                # 使用常规forward
-                outputs = model(images)
-            
-            # 计算预测结果
-            preds = outputs.argmax(dim=1)
-            
-            # 确保两个张量在同一设备上进行比较
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-    return 100.0 * correct / total
-
+def setup_txt_epochs(args, dataset_name):
+    """设置不同数据集的txt_epochs参数"""
+    if dataset_name == 'Emotion6':
+        args.txt_epochs = getattr(args, 'txt_epochs', 1000)
+    elif dataset_name == 'Emoset':
+        args.txt_epochs = getattr(args, 'txt_epochs', 800)
+    else:
+        args.txt_epochs = getattr(args, 'txt_epochs', 1000)
+    
+    print(f"Text classifier epochs set to: {args.txt_epochs} for dataset {dataset_name}")
 
 
 def main(args):
@@ -723,7 +1073,17 @@ def main(args):
         return
 
     # —— 图像微调流程 —— 
-    if hasattr(args, 'direct_dualtask') and args.direct_dualtask:
+    if hasattr(args, 'multi_layer_prompt') and args.multi_layer_prompt:
+        # 多层prompt模式：使用MultiLayerLaFTer训练器
+        print("=== Multi-Layer Prompt Mode Activated ===")
+        print("Note: Use --trainer MultiLayerLaFTer for multi-layer prompt training")
+        print("Current trainer:", cfg.TRAINER.NAME)
+        
+        if cfg.TRAINER.NAME != "MultiLayerLaFTer":
+            print("Warning: For optimal multi-layer prompt performance, use --trainer MultiLayerLaFTer")
+        
+        train_multi_layer_lafter(args, model, train_loader, test_loader)
+    elif hasattr(args, 'direct_dualtask') and args.direct_dualtask:
         # 直接双任务模式：跳过文本分类器训练，直接进入图像双任务微调
         print("=== Direct Dual-Task Mode Activated ===")
         train_lafter_direct(args, model, train_loader, test_loader)
@@ -750,8 +1110,8 @@ if __name__ == "__main__":
         "--seed", type=int, default=7777, help="only positive value enables a fixed seed"
     )
     parser.add_argument(
-        "--print_freq", type=int, default=10, help="only positive value enables a fixed seed"
-    )
+       "--print_freq", type=int, default=10, help="only positive value enables a fixed seed"
+   )
     parser.add_argument(
         "--source-domains", type=str, nargs="+", help="source domains for DA/DG"
     )
@@ -819,6 +1179,8 @@ if __name__ == "__main__":
                 help='双任务损失中分布学习的权重系数（λ）')
     parser.add_argument('--direct_dualtask', action='store_true',
                 help='直接双任务模式：跳过文本分类器训练，直接进入图像双任务微调')
+    parser.add_argument('--multi_layer_prompt', action='store_true',
+                help='启用多层Prompt技术（建议搭配 --trainer MultiLayerLaFTer 使用）')
     args = parser.parse_args()
     args.mile_stones = None
     main(args)

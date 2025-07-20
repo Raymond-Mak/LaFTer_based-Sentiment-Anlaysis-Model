@@ -1,0 +1,5 @@
+DATASET:
+  NAME: "Emoset"
+  DISTRIBUTION_STRATEGY: "strategy1"
+  SIGMA_CONF: 1.0
+  EPSILON: 0.1
