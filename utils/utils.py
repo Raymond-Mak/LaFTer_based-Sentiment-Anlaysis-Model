@@ -63,7 +63,8 @@ def setup_text_training_utils(args, model):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, float(args.epochs))
     else:
-        raise NotImplementedError
+        # 默认使用最基础的学习率调度器（不带warmup）
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.epochs, gamma=1.0)
 
     criteria = LabelSmoothingCrossEntropy()
     return optimizer, scheduler, criteria
@@ -150,7 +151,28 @@ def setup_lafter_training_utils(args, model):
     optimizer = optim.AdamW(optimizer_grouped_parameters, betas=(0.9, 0.999), weight_decay=args.weight_decay)
     print(f">>> Adapter learning rate: {args.lr * 5.0:.6f}")
     print(f">>> Other parameters learning rate: {args.lr:.6f}")
-    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, args.mile_stones, 0.60)
+    
+    # 调度器选择
+    if args.scheduler == 'coslr':
+        scheduler = CosineLRScheduler(optimizer,
+                                      t_initial=args.epochs,
+                                      lr_min=1e-6,                   # 防止学习率过小：余弦退火会让学习率接近0，导致训练停滞
+                                      warmup_lr_init=args.lr * 0.1,  # warmup起始学习率为正常学习率的0.1倍
+                                      warmup_t=2,                    # warmup 2个epoch
+                                      cycle_limit=1,
+                                      t_in_epochs=True)
+        print(f">>> Using CosineLRScheduler with warmup: warmup_lr_init={args.lr * 0.1:.6f}, warmup_t=5")
+    elif args.scheduler == 'multistep' or args.scheduler == 'cosine':
+        # 使用带warmup的恒定学习率调度器替代MultiStepLR和CosineAnnealingLR
+        warmup_epochs = 3
+        constant_scheduler = optim.lr_scheduler.ConstantLR(optimizer, factor=1.0, total_iters=args.epochs)
+        scheduler = ConstantWarmupScheduler(optimizer, constant_scheduler, warmup_epochs, args.lr * 0.1)
+        print(f">>> Using ConstantWarmupScheduler: warmup_epochs={warmup_epochs}, warmup_lr={args.lr * 0.1:.6f}")
+    else:
+        # 默认使用最基础的学习率调度器（不带warmup）
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.epochs, gamma=1.0)
+        print(f">>> Using default StepLR scheduler without warmup")
+    
     criteria = LabelSmoothingCrossEntropy()
     return optimizer, scheduler, criteria
 

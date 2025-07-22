@@ -337,7 +337,11 @@ def train_multi_layer_lafter(args, model, tr_loader, val_loader):
             epoch_loss += total_loss.item()
             num_batches += 1
         
-        scheduler.step()
+        # CosineLRScheduler需要传入epoch参数，其他调度器不需要
+        if hasattr(scheduler, 't_initial'):  # CosineLRScheduler的特征
+            scheduler.step(epoch + 1)
+        else:
+            scheduler.step()
         
         # 评估
         print(f'Evaluation at epoch {epoch + 1}')
@@ -808,7 +812,11 @@ def train_lafter(args, model, tr_loader, val_loader):
             avg_total_loss = epoch_total_loss / num_batches
             print(f"Epoch {epoch + 1} - Avg Single-Task Loss: {avg_total_loss:.4f}")
         
-        scheduler.step()
+        # CosineLRScheduler需要传入epoch参数，其他调度器不需要
+        if hasattr(scheduler, 't_initial'):  # CosineLRScheduler的特征
+            scheduler.step(epoch + 1)
+        else:
+            scheduler.step()
         print(f'Evaluation: {epoch}')
         acc = test_prompting(val_loader, model)
         print(f'TOP-1 Accuracy: {acc}')
@@ -1016,7 +1024,11 @@ def train_lafter_direct(args, model, tr_loader, val_loader):
         print(f"Epoch {epoch + 1} - Avg Total Loss: {avg_total_loss:.4f}, "
               f"Avg Cls Loss: {avg_cls_loss:.4f}, Avg Dist Loss: {avg_dist_loss:.4f}")
         
-        scheduler.step()
+        # CosineLRScheduler需要传入epoch参数，其他调度器不需要
+        if hasattr(scheduler, 't_initial'):  # CosineLRScheduler的特征
+            scheduler.step(epoch + 1)
+        else:
+            scheduler.step()
         print(f'Evaluation: {epoch}')
         acc = test_prompting(val_loader, model)
         print(f'TOP-1 Accuracy: {acc}')
@@ -1168,8 +1180,8 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=50)
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--epochs', type=int, default=5)
-    parser.add_argument('--txt_epochs', type=int, default=1000)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--txt_epochs', type=int, default=500)
     parser.add_argument('--logfolder', default='logs', type=str)
     parser.add_argument('--skip_finetune', action='store_true', 
                 help='只训练文本分类器，跳过图像微调步骤') #new

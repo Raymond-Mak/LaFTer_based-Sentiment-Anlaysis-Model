@@ -21,7 +21,7 @@ if "%SKIP_FT%"=="1" (
         --dataset-config-file configs\datasets\%DSET%.yaml ^
         --config-file configs\trainers\text_cls\%CFG%.yaml ^
         --output-dir output\%TRAINER%\%CFG%\%DSET% ^
-        --lr 0.0005 ^
+        --lr 0.001 ^
         --txt_cls %TXT_CLS% ^
         --skip_finetune
 ) else (
@@ -32,7 +32,7 @@ if "%SKIP_FT%"=="1" (
         --dataset-config-file configs\datasets\%DSET%.yaml ^
         --config-file configs\trainers\text_cls\%CFG%.yaml ^
         --output-dir output\%TRAINER%\%CFG%\%DSET% ^
-        --lr 0.0005 ^
+        --lr 0.001 ^
         --txt_cls %TXT_CLS%
 )
 

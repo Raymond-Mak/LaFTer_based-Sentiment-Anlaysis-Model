@@ -14,9 +14,10 @@ set DATASET_CONFIG=configs/datasets/Emotion6.yaml
 set OUTPUT_DIR=output/multi_layer_prompt_test
 
 echo.
-echo Test 1: Multi-Layer Prompt + Dual Task Learning
+echo Multi-Layer Prompt + Dual Task Learning
 echo Using MultiLayerLaFTer trainer...
 python LaFTer.py ^
+    --root %DATA% ^
     --trainer MultiLayerLaFTer ^
     --config-file %CONFIG_FILE% ^
     --dataset-config-file %DATASET_CONFIG% ^

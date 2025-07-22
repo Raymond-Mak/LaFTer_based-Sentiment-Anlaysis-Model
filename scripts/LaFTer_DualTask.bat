@@ -3,7 +3,7 @@
 set DATA=data
 set TRAINER=LaFTer
 set CFG=vit_b32
-set DSET=Emotion6
+set DSET=Emoset
 set TXT_CLS=lafter
 
 :: --- Distribution Strategy Configuration ---
@@ -21,10 +21,11 @@ python LaFTer.py ^
     --config-file configs\trainers\text_cls\%CFG%.yaml ^
     --output-dir output\%TRAINER%\%CFG%\%DSET%_dual_task_%DISTRIBUTION_STRATEGY% ^
     --lr 0.001 ^
-    --epochs 7 ^
+    --epochs 10 ^
     --txt_cls %TXT_CLS% ^
     --dual_task ^
     --lambda_weight 0.8 ^
+    --scheduler none ^
     DATASET.DISTRIBUTION_STRATEGY %DISTRIBUTION_STRATEGY% ^
     DATASET.SIGMA_CONF %SIGMA_CONF% ^
     DATASET.EPSILON %EPSILON%
