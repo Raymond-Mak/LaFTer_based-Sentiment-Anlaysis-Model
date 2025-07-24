@@ -4,7 +4,8 @@
       "Bash(del:*)",
       "Bash(python:*)",
       "Bash(scriptsquick_test.bat)",
-      "Bash(cmd /c:*)"
+      "Bash(cmd /c:*)",
+      "Bash(\"scripts\\LaFTer_HybridCascade.bat\")"
     ],
     "deny": []
   }

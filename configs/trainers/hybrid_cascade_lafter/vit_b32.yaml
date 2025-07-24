@@ -1,0 +1,29 @@
+MODEL:
+  BACKBONE:
+    NAME: "ViT-B/32"
+
+DATALOADER:
+  NUM_WORKERS: 0
+
+TRAINER:
+  COOP:
+    N_CTX: 16
+    CTX_INIT: ""
+    CLASS_TOKEN_POSITION: "end"
+    PREC: "fp16"
+
+OPTIM:
+  LR: 0.002
+  MAX_EPOCH: 10
+  LR_SCHEDULER: "cosine"
+  WARMUP_EPOCH: 1
+  WARMUP_TYPE: "constant"
+  WARMUP_CONS_LR: 1e-5
+  WEIGHT_DECAY: 0.0001
+
+# HybridCascade-LaFTer specific configs
+HYBRID_CASCADE:
+  CONSISTENCY_LOSS_WEIGHT: 0.1
+  NGA_INIT_SIGMA: 1.0
+  STAGE_BOUNDARIES: [[0, 1, 2], [3, 4], [5, 6, 7]]
+  EXTRACTION_INDICES: [4, 5, 6, 7, 8, 9, 10, 11]

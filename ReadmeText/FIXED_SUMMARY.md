@@ -10,7 +10,6 @@
 
 ```
 trainers/
-├── lafter_common.py       # 共享组件和基类
 ├── LaFTer_basic.py        # 基础LaFTer训练器 (修复了forward_backward)
 ├── LaFTer_multilayer.py   # 多层Prompt LaFTer训练器
 └── README.md              # 训练器使用说明

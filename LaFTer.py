@@ -13,6 +13,7 @@ import datasets.Emoset
 # 导入新的分离后的训练器 - 确保训练器被注册
 import trainers.LaFTer_basic
 import trainers.LaFTer_multilayer
+import trainers.HybridCascadeLaFTer
 from utils.utils import *
 import os
 
@@ -118,6 +119,12 @@ def extend_cfg(cfg):
     cfg.CONSISTENCY_LOSS.ALPHA = 0.1
     cfg.DATASET.EPSILON = 0.1     # Parameter to ensure non-zero probabilities
 
+    # HybridCascade configuration
+    cfg.HYBRID_CASCADE = CN()
+    cfg.HYBRID_CASCADE.CONSISTENCY_LOSS_WEIGHT = 0.1
+    cfg.HYBRID_CASCADE.NGA_INIT_SIGMA = 1.0
+    cfg.HYBRID_CASCADE.STAGE_BOUNDARIES = [[0, 1, 2], [3, 4], [5, 6, 7]]
+    cfg.HYBRID_CASCADE.EXTRACTION_INDICES = [4, 5, 6, 7, 8, 9, 10, 11]
 
     cfg.txt_cls = args.txt_cls
     cfg.gpt_prompts = args.gpt_prompts
